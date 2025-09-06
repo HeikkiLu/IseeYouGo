@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gocv.io/x/gocv"
 )
 
@@ -23,7 +25,108 @@ type Device struct {
 	FPS        int
 }
 
+type Config struct {
+	BotToken string `json:"bot_token"`
+	ChatID   int64  `json:"chat_id"`
+}
+
 var devices []Device
+var config Config
+var bot *tgbotapi.BotAPI
+
+func configPath() string {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, ".config")
+	}
+	dir := filepath.Join(base, "iseeyougo")
+	os.MkdirAll(dir, 0o755) // ensure directory exists
+	return filepath.Join(dir, "config.json")
+}
+
+func loadConfig() {
+	path := configPath()
+	fmt.Println("Loading Telegram configuration from", path)
+
+	file, err := os.Open(path)
+	if err != nil {
+		fmt.Println("Config not found, creating example at", path)
+
+		example := Config{
+			BotToken: "PUT_YOUR_BOT_TOKEN_HERE",
+			ChatID:   0,
+		}
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		exampleFile, createErr := os.Create(path)
+		if createErr != nil {
+			log.Printf("Cannot create %s: %v\n", path, createErr)
+			return
+		}
+		defer exampleFile.Close()
+
+		json.NewEncoder(exampleFile).Encode(example)
+		fmt.Println("Created config.json. Edit the file and restart.")
+		return
+	}
+	defer file.Close()
+
+	if err := json.NewDecoder(file).Decode(&config); err != nil {
+		fmt.Println("Error reading", path, ":", err)
+		return
+	}
+
+	if config.BotToken == "PUT_YOUR_BOT_TOKEN_HERE" || config.ChatID == 0 {
+		fmt.Println("Please edit", path, "with your bot token and chat ID")
+		return
+	}
+
+	var botErr error
+	bot, botErr = tgbotapi.NewBotAPI(config.BotToken)
+	if botErr != nil {
+		fmt.Printf("Telegram bot error: %v\n", botErr)
+		return
+	}
+	fmt.Printf("Telegram bot connected (@%s)\n", bot.Self.UserName)
+}
+
+func sendVideo(videoPath string) {
+	if bot == nil {
+		fmt.Println("Telegram bot not configured, video saved locally.")
+		return
+	}
+
+	fileInfo, err := os.Stat(videoPath)
+	if err != nil {
+		log.Printf("Cannot access video file: %v", err)
+	}
+
+	fileSizeMB := float64(fileInfo.Size()) / (1024 * 1024)
+	if fileSizeMB > 50 {
+		log.Printf("Video too large for Telegram (%.1f MB > 50MB", fileSizeMB)
+		return
+	}
+
+	fmt.Println("Sending video to Telegram...")
+
+	video := tgbotapi.NewVideo(config.ChatID, tgbotapi.FilePath(videoPath))
+	video.Caption = fmt.Sprintf("Laptop lid opened - %s", time.Now().Format("Jan 2, 15:04:05"))
+
+	_, botErr := bot.Send(video)
+
+	if botErr != nil {
+		log.Printf("Failed to send video to Telegram: %v", botErr)
+
+		msg := tgbotapi.NewMessage(config.ChatID, fmt.Sprintf("Video recorded but failed to send (%.1f MB)\n%s", fileSizeMB, videoPath))
+
+		if _, msgErr := bot.Send(msg); msgErr != nil {
+			log.Printf("Failed to send notification message: %v", msgErr)
+		}
+		return
+	}
+	fmt.Println("Video sent successfully")
+
+}
 
 // true=open, false=closed
 func checkLidStatus() (bool, error) {
@@ -86,7 +189,7 @@ func chooseDevice() (Device, error) {
 	return devices[n], nil
 }
 
-func monitor(d Device) {
+func monitor(dev Device, dur time.Duration) {
 	log.Println("Monitoring lid state... (Ctrl+C to quit)")
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -114,9 +217,7 @@ func monitor(d Device) {
 				lastTrigger = time.Now()
 				armed = false
 				go func() {
-					if err := takeVideo(d, 10*time.Second); err != nil {
-						log.Printf("takeVideo: %v", err)
-					}
+					takeVideo(dev, dur)
 				}()
 			}
 		}
@@ -125,12 +226,13 @@ func monitor(d Device) {
 }
 
 // takeVideo records for 'dur' and saves timestamped MP4
-func takeVideo(d Device, dur time.Duration) error {
-	fmt.Println("Lid opened → recording…")
+func takeVideo(d Device, dur time.Duration) {
+	fmt.Println("Lid opened, recording…")
 
 	cap, err := gocv.OpenVideoCapture(d.Id)
 	if err != nil || !cap.IsOpened() {
-		return fmt.Errorf("open cam %d: %w", d.Id, err)
+		log.Printf("open cam %d: %w", d.Id, err)
+		return
 	}
 	defer cap.Close()
 
@@ -150,11 +252,11 @@ func takeVideo(d Device, dur time.Duration) error {
 	_ = os.MkdirAll(dir, 0o755)
 	filename := filepath.Join(dir, fmt.Sprintf("capture_%s.mp4", ts))
 
-	writer, err := gocv.VideoWriterFile(filename, "mp4v", float64(fps), w, h, true)
+	writer, err := gocv.VideoWriterFile(filename, "avc1", float64(fps), w, h, true)
 	if err != nil {
-		return fmt.Errorf("create writer: %w", err)
+		log.Printf("create writer: %w", err)
+		return
 	}
-	defer writer.Close()
 
 	img := gocv.NewMat()
 	defer img.Close()
@@ -163,7 +265,8 @@ func takeVideo(d Device, dur time.Duration) error {
 	tick := time.NewTicker(time.Second / time.Duration(fps))
 	defer tick.Stop()
 
-	fmt.Printf("Recording %dx%d @ %dfps → %s\n", w, h, fps, filename)
+	fmt.Printf("Recording %dx%d @ %dfps: %s\n", w, h, fps, filename)
+
 	for range tick.C {
 		if time.Now().After(deadline) {
 			break
@@ -172,31 +275,43 @@ func takeVideo(d Device, dur time.Duration) error {
 			continue
 		}
 		if err := writer.Write(img); err != nil {
-			return fmt.Errorf("write: %w", err)
+			fmt.Printf("Write: %w", err)
+			continue
 		}
 	}
+
+	writer.Close()
+	time.Sleep(1 * time.Second)
+
 	fmt.Println("Saved:", filename)
-	return nil
+	sendVideo(filename)
 }
 
 func main() {
-	enumerate(8)
+
+	loadConfig()
+
+	enumerate(3)
 	if len(devices) == 0 {
-		log.Fatal("no cameras found")
+		log.Fatal("No cameras found")
 	}
-	d, err := chooseDevice()
+	dev, err := chooseDevice()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Optional: ask duration
 	fmt.Print("Length in seconds (default 15): ")
-	var s int
-	if _, scanErr := fmt.Scan(&s); scanErr != nil || s <= 0 {
-		s = 15
-	}
-	// Pass duration into monitor via closure if you like; here we fixed 10s in monitor.
-	_ = s
 
-	monitor(d)
+	r := bufio.NewReader(os.Stdin)
+	line, _ := r.ReadString('\n')
+	line = strings.TrimSpace(line)
+
+	dur := 15 // default
+	if line != "" {
+		if n, err := strconv.Atoi(line); err == nil && n > 0 {
+			dur = n
+		}
+	}
+
+	monitor(dev, time.Duration(dur)*time.Second)
 }
