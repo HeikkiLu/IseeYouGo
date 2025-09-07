@@ -2,7 +2,7 @@
 
 Records video when your MacBook lid opens. Sends it to Telegram if configured. Works as both system tray application or in cli mode.
 
-## Installation
+## Installation with [homebrew](https://brew.sh)
 
 1. **Install Go and OpenCV** (if not installed):
    ```bash
