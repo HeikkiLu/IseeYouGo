@@ -247,9 +247,16 @@ func takeVideo(d Device, dur time.Duration) {
 		fps = 30
 	}
 
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Sprintf("Error finding home dir: %v\n", err)
+		return
+	}
+
 	ts := time.Now().Format("20060102_150405")
-	dir := "videos"
+	dir := filepath.Join(home, "iseeyougo", "videos")
 	_ = os.MkdirAll(dir, 0o755)
+
 	filename := filepath.Join(dir, fmt.Sprintf("capture_%s.mp4", ts))
 
 	writer, err := gocv.VideoWriterFile(filename, "avc1", float64(fps), w, h, true)

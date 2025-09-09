@@ -250,6 +250,8 @@ func (g *GUI) startMonitoring() {
 	// Start monitoring
 	g.isMonitoring = true
 	g.startButton.Disable()
+	g.botTokenEntry.Disable()
+	g.chatIDEntry.Disable()
 	g.stopButton.Enable()
 	g.statusLabel.SetText("Monitoring - waiting for lid close/open")
 	g.appendLog("Started monitoring lid state...")
@@ -346,9 +348,16 @@ func (g *GUI) recordVideo() {
 		fps = 30
 	}
 
+	home, err := os.UserHomeDir()
+	if err != nil {
+		g.appendLog(fmt.Sprintf("Error finding home dir: %v", err))
+		return
+	}
+
 	ts := time.Now().Format("20060102_150405")
-	dir := "videos"
+	dir := filepath.Join(home, "iseeyougo", "videos")
 	_ = os.MkdirAll(dir, 0o755)
+
 	filename := filepath.Join(dir, fmt.Sprintf("capture_%s.mp4", ts))
 
 	writer, err := gocv.VideoWriterFile(filename, "avc1", float64(fps), w, h, true)

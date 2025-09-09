@@ -21,7 +21,7 @@ Records video when your MacBook lid opens. Sends it to Telegram if configured. W
 
 3. **Run the application**:
    ```bash
-   # GUI mode - compact system tray version (recommended)
+   # GUI mode - system tray version 
    ./iseeyou
 
    # CLI mode
