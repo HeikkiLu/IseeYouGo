@@ -75,7 +75,6 @@ On first run, macOS will request:
 
 Grant these permissions when prompted for the app to function properly.
 
-## Building
 
 The app uses these main dependencies:
 - `gocv.io/x/gocv` - OpenCV bindings for Go
